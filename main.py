@@ -4,14 +4,46 @@ from enum import Enum
 from typing import Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Form, HTTPException
-from fastapi.responses import HTMLResponse
-from groq import Groq
+from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import HTMLResponse, JSONResponse
+from groq import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    Groq,
+    RateLimitError,
+)
 from pydantic import BaseModel, Field
 
 load_dotenv()
 
-app = FastAPI(title="Workout Plan Generator")
+app = FastAPI(
+    title="Workout Plan Generator",
+    description=(
+        "Generate a personalized weekly workout plan from fitness goals, "
+        "experience level, schedule, equipment, and optional limitations. "
+        "Interactive docs: `/docs` (Swagger) and `/redoc` (ReDoc)."
+    ),
+    version="0.1.0",
+)
+
+FRIENDLY_EMPTY_PLAN = (
+    "We couldn't build a usable workout plan from the AI response. "
+    "Please try again in a moment."
+)
+FRIENDLY_API_FAILURE = (
+    "We couldn't reach the workout planner right now. "
+    "Please check your connection and try again shortly."
+)
+FRIENDLY_AUTH_FAILURE = (
+    "The workout planner isn't configured correctly (API key). "
+    "Please check GROQ_API_KEY and try again."
+)
+FRIENDLY_RATE_LIMIT = (
+    "Too many requests right now. Please wait a moment and try again."
+)
 
 
 class FitnessGoal(str, Enum):
@@ -34,14 +66,82 @@ class EquipmentAccess(str, Enum):
 
 
 class WorkoutPlanRequest(BaseModel):
-    fitness_goal: FitnessGoal
-    experience_level: ExperienceLevel
-    days_per_week: int = Field(..., ge=1, le=7)
-    equipment: EquipmentAccess
+    fitness_goal: FitnessGoal = Field(
+        ...,
+        description="Primary training objective for the weekly plan.",
+        examples=["Build muscle"],
+    )
+    experience_level: ExperienceLevel = Field(
+        ...,
+        description="Training experience used to set volume and intensity.",
+        examples=["Beginner"],
+    )
+    days_per_week: int = Field(
+        ...,
+        ge=1,
+        le=7,
+        description="Number of training days available each week (1–7).",
+        examples=[3],
+    )
+    equipment: EquipmentAccess = Field(
+        ...,
+        description="Equipment available for the plan.",
+        examples=["Home dumbbells"],
+    )
     injuries_or_limitations: Optional[str] = Field(
         default=None,
-        description="Optional constraints, e.g. 'bad knees', 'no overhead pressing'",
+        description="Optional constraints, e.g. 'bad knees', 'no overhead pressing'.",
+        examples=["bad knees"],
     )
+
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "fitness_goal": "Build muscle",
+                    "experience_level": "Beginner",
+                    "days_per_week": 3,
+                    "equipment": "Home dumbbells",
+                    "injuries_or_limitations": "bad knees",
+                }
+            ]
+        }
+    }
+
+
+class WorkoutPlanResponse(BaseModel):
+    fitness_goal: str = Field(..., description="Echo of the requested fitness goal.")
+    experience_level: str = Field(..., description="Echo of the requested experience level.")
+    days_per_week: int = Field(..., description="Echo of training days per week.")
+    equipment: str = Field(..., description="Echo of equipment access.")
+    injuries_or_limitations: Optional[str] = Field(
+        default=None,
+        description="Echo of limitations, or null if none were provided.",
+    )
+    plan: str = Field(
+        ...,
+        description=(
+            "Personalized weekly workout plan in Markdown: day-by-day breakdown "
+            "with warm-ups, exercises (sets × reps), rest guidance, and notes."
+        ),
+    )
+
+
+def _is_usable_plan(plan: str) -> bool:
+    """Reject empty or clearly malformed LLM output."""
+    text = plan.strip()
+    if len(text) < 80:
+        return False
+    lowered = text.lower()
+    has_day_structure = any(
+        marker in lowered
+        for marker in ("day 1", "day 2", "## day", "### day", "monday", "workout")
+    )
+    has_exercise_cue = any(
+        marker in lowered
+        for marker in ("sets", "reps", "warm-up", "warmup", "rest", "exercise")
+    )
+    return has_day_structure and has_exercise_cue
 
 
 def generate_workout_plan(
@@ -53,7 +153,7 @@ def generate_workout_plan(
 ) -> str:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
-        raise HTTPException(status_code=500, detail="Missing GROQ_API_KEY in environment")
+        raise HTTPException(status_code=500, detail=FRIENDLY_AUTH_FAILURE)
 
     client = Groq()
     model = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
@@ -76,32 +176,93 @@ Requirements:
 - Use clean Markdown with headings and bullet lists so it is easy to read.
 """
 
-    completion = client.chat.completions.create(
-        model=model,
-        messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are an experienced personal trainer. "
-                    "Write safe, practical, personalized workout plans in clear Markdown. "
-                    "Never invent medical advice; work around stated limitations."
-                ),
-            },
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.7,
-        max_tokens=2500,
-    )
+    try:
+        completion = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an experienced personal trainer. "
+                        "Write safe, practical, personalized workout plans in clear Markdown. "
+                        "Never invent medical advice; work around stated limitations."
+                    ),
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+            max_tokens=2500,
+        )
+    except AuthenticationError:
+        raise HTTPException(status_code=500, detail=FRIENDLY_AUTH_FAILURE) from None
+    except RateLimitError:
+        raise HTTPException(status_code=429, detail=FRIENDLY_RATE_LIMIT) from None
+    except (APIConnectionError, APITimeoutError):
+        raise HTTPException(status_code=503, detail=FRIENDLY_API_FAILURE) from None
+    except APIStatusError:
+        raise HTTPException(status_code=502, detail=FRIENDLY_API_FAILURE) from None
+    except Exception:
+        raise HTTPException(status_code=502, detail=FRIENDLY_API_FAILURE) from None
 
-    plan = completion.choices[0].message.content
-    if not plan:
-        raise HTTPException(status_code=502, detail="LLM returned an empty workout plan")
+    try:
+        plan = completion.choices[0].message.content
+    except (AttributeError, IndexError, TypeError):
+        raise HTTPException(status_code=502, detail=FRIENDLY_EMPTY_PLAN) from None
 
-    return plan.strip()
+    if not plan or not str(plan).strip():
+        raise HTTPException(status_code=502, detail=FRIENDLY_EMPTY_PLAN)
+
+    plan_text = str(plan).strip()
+    if not _is_usable_plan(plan_text):
+        raise HTTPException(status_code=502, detail=FRIENDLY_EMPTY_PLAN)
+
+    return plan_text
 
 
-@app.post("/workout-plan")
-def create_workout_plan(body: WorkoutPlanRequest) -> dict:
+def _validation_message(errors: list) -> str:
+    """Turn Pydantic/FastAPI validation errors into a short friendly message."""
+    for err in errors:
+        loc = err.get("loc", ())
+        field = str(loc[-1]) if loc else "input"
+        if field == "days_per_week":
+            return "Please choose between 1 and 7 training days per week."
+        if field in {"fitness_goal", "experience_level", "equipment"}:
+            return f"Please choose a valid option for {field.replace('_', ' ')}."
+        if err.get("type") == "missing":
+            return f"Please provide {field.replace('_', ' ')}."
+    return "Some inputs look invalid. Please check the form and try again."
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(
+    request: Request, exc: RequestValidationError
+) -> JSONResponse | HTMLResponse:
+    message = _validation_message(exc.errors())
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept or request.url.path == "/":
+        return _render_page(error=message)
+    return JSONResponse(status_code=422, content={"detail": message})
+
+
+@app.post(
+    "/workout-plan",
+    response_model=WorkoutPlanResponse,
+    tags=["Workout plans"],
+    summary="Generate a personalized workout plan",
+    responses={
+        200: {"description": "Workout plan generated successfully."},
+        422: {"description": "Validation error (invalid or missing fields)."},
+        429: {"description": "Upstream rate limit; retry shortly."},
+        500: {"description": "Server misconfiguration (e.g. missing/invalid GROQ_API_KEY)."},
+        502: {"description": "Upstream LLM failed or returned an unusable plan."},
+        503: {"description": "Could not reach the LLM (network/timeout)."},
+    },
+)
+def create_workout_plan(body: WorkoutPlanRequest) -> WorkoutPlanResponse:
+    """Create a day-by-day weekly workout plan from the request body.
+
+    The `plan` field is Markdown suitable for display or further formatting.
+    """
     plan = generate_workout_plan(
         fitness_goal=body.fitness_goal.value,
         experience_level=body.experience_level.value,
@@ -109,14 +270,14 @@ def create_workout_plan(body: WorkoutPlanRequest) -> dict:
         equipment=body.equipment.value,
         injuries_or_limitations=body.injuries_or_limitations,
     )
-    return {
-        "fitness_goal": body.fitness_goal.value,
-        "experience_level": body.experience_level.value,
-        "days_per_week": body.days_per_week,
-        "equipment": body.equipment.value,
-        "injuries_or_limitations": body.injuries_or_limitations,
-        "plan": plan,
-    }
+    return WorkoutPlanResponse(
+        fitness_goal=body.fitness_goal.value,
+        experience_level=body.experience_level.value,
+        days_per_week=body.days_per_week,
+        equipment=body.equipment.value,
+        injuries_or_limitations=body.injuries_or_limitations,
+        plan=plan,
+    )
 
 
 def _options(enum_cls: type[Enum], selected: str) -> str:
@@ -315,12 +476,12 @@ def _render_page(
     return HTMLResponse(page)
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
 def index() -> HTMLResponse:
     return _render_page()
 
 
-@app.post("/", response_class=HTMLResponse)
+@app.post("/", response_class=HTMLResponse, include_in_schema=False)
 def index_generate(
     fitness_goal: str = Form(...),
     experience_level: str = Form(...),
@@ -337,13 +498,13 @@ def index_generate(
     )
     try:
         if not 1 <= days_per_week <= 7:
-            raise ValueError("Days per week must be between 1 and 7.")
+            raise ValueError("Please choose between 1 and 7 training days per week.")
         if fitness_goal not in {g.value for g in FitnessGoal}:
-            raise ValueError("Invalid fitness goal.")
+            raise ValueError("Please choose a valid fitness goal.")
         if experience_level not in {e.value for e in ExperienceLevel}:
-            raise ValueError("Invalid experience level.")
+            raise ValueError("Please choose a valid experience level.")
         if equipment not in {e.value for e in EquipmentAccess}:
-            raise ValueError("Invalid equipment option.")
+            raise ValueError("Please choose a valid equipment option.")
 
         plan = generate_workout_plan(
             fitness_goal=fitness_goal,
@@ -357,3 +518,5 @@ def index_generate(
         return _render_page(**form_kwargs, error=str(exc.detail))
     except ValueError as exc:
         return _render_page(**form_kwargs, error=str(exc))
+    except Exception:
+        return _render_page(**form_kwargs, error=FRIENDLY_API_FAILURE)
