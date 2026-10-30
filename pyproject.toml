@@ -5,6 +5,7 @@ description = "Workout Plan Generator based on Fitness goals"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "fastapi[standard]>=0.136.3",
     "groq>=1.2.0",
+    "python-dotenv>=1.0.0",
+    "streamlit>=1.40.0",
 ]
