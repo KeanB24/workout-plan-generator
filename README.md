@@ -2,6 +2,8 @@
 
 Generate a **personalized weekly workout plan** from your fitness goals, experience level, schedule, and equipment — with a Streamlit UI and a Groq LLM backend.
 
+**Live app:** [https://workout-plan-generator-nb.streamlit.app/](https://workout-plan-generator-nb.streamlit.app/)
+
 **Credits:** Built by Neel Bose.
 
 ## Goal
@@ -60,9 +62,11 @@ Open the local URL Streamlit prints (usually [http://localhost:8501](http://loca
 
 ## Deploy (Streamlit Community Cloud)
 
-This app is meant to be hosted on [Streamlit Community Cloud](https://share.streamlit.io) from the GitHub repo (live URL looks like `https://<app-name>.streamlit.app`, not `*.github.io`).
+This app is hosted on [Streamlit Community Cloud](https://share.streamlit.io): [https://workout-plan-generator-nb.streamlit.app/](https://workout-plan-generator-nb.streamlit.app/)
 
-1. Push the latest code to GitHub: [KeanB24/workout-plan-generator](https://github.com/KeanB24/workout-plan-generator)
+To redeploy or recreate the app from GitHub ([KeanB24/workout-plan-generator](https://github.com/KeanB24/workout-plan-generator)):
+
+1. Push the latest code to GitHub
 2. Sign in at [share.streamlit.io](https://share.streamlit.io) with GitHub
 3. **New app** → select this repository, branch `main`, main file path `app.py`
 4. Under **Advanced settings → Secrets**, add:
